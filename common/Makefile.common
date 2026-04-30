@@ -1,0 +1,90 @@
+#
+# FreeRTOS 教程 - 公共 Makefile
+# 目标平台: STM32F405 (QEMU netduinoplus2)
+#
+
+# 工具链
+CROSS_COMPILE = /opt/gcc-arm-none-eabi-10.3-2021.10/bin/arm-none-eabi-
+CC      = $(CROSS_COMPILE)gcc
+AS      = $(CROSS_COMPILE)as
+LD      = $(CROSS_COMPILE)ld
+OBJCOPY = $(CROSS_COMPILE)objcopy
+SIZE    = $(CROSS_COMPILE)size
+
+# 项目根目录
+ROOT_DIR    = $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))/..
+COMMON_DIR  = $(ROOT_DIR)/common
+FREERTOS_DIR = $(ROOT_DIR)/FreeRTOS
+
+# QEMU 配置
+# 使用 MPS2-AN385 (Cortex-M3) 作为模拟平台
+# 该平台与 STM32 系列共享相同的 Cortex-M 架构和编程模型
+QEMU = qemu-system-arm
+QEMU_MACHINE = mps2-an385
+QEMU_FLAGS = -machine $(QEMU_MACHINE) -nographic -kernel
+
+# CPU 配置 (Cortex-M3)
+CPU = -mcpu=cortex-m3 -mthumb
+
+# 编译选项
+CFLAGS  = $(CPU) -Wall -Wextra -g -O1
+CFLAGS += -ffunction-sections -fdata-sections
+
+# 链接选项
+LDFLAGS  = $(CPU) -T $(COMMON_DIR)/linker.ld
+LDFLAGS += -Wl,--gc-sections
+LDFLAGS += --specs=nosys.specs --specs=nano.specs
+LDFLAGS += -Wl,-Map=$(TARGET).map
+
+# FreeRTOS 源文件
+FREERTOS_SRC  = $(FREERTOS_DIR)/tasks.c
+FREERTOS_SRC += $(FREERTOS_DIR)/queue.c
+FREERTOS_SRC += $(FREERTOS_DIR)/list.c
+FREERTOS_SRC += $(FREERTOS_DIR)/timers.c
+FREERTOS_SRC += $(FREERTOS_DIR)/event_groups.c
+FREERTOS_SRC += $(FREERTOS_DIR)/portable/GCC/ARM_CM3/port.c
+FREERTOS_SRC += $(FREERTOS_DIR)/portable/MemMang/heap_4.c
+
+# 公共源文件
+COMMON_SRC  = $(COMMON_DIR)/startup.c
+COMMON_SRC += $(COMMON_DIR)/syscalls.c
+
+# 头文件路径
+INCLUDES  = -I$(FREERTOS_DIR)/include
+INCLUDES += -I$(FREERTOS_DIR)/portable/GCC/ARM_CM3
+INCLUDES += -I$(COMMON_DIR)
+INCLUDES += -I.
+
+# 所有源文件
+ALL_SRC = $(APP_SRC) $(FREERTOS_SRC) $(COMMON_SRC)
+ALL_OBJ = $(ALL_SRC:.c=.o)
+
+# 默认目标
+all: $(TARGET).elf $(TARGET).bin
+	@$(SIZE) $(TARGET).elf
+
+$(TARGET).elf: $(ALL_OBJ)
+	$(CC) $(LDFLAGS) -o $@ $^
+
+$(TARGET).bin: $(TARGET).elf
+	$(OBJCOPY) -O binary $< $@
+
+%.o: %.c
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+
+# 运行 QEMU (自动5秒后退出)
+run: $(TARGET).elf
+	@echo "=== 运行 QEMU (MPS2-AN385 Cortex-M3) ==="
+	@echo "=== 5秒后自动退出，或按 Ctrl+A X 手动退出 ==="
+	@timeout 5 $(QEMU) $(QEMU_FLAGS) $< || true
+
+# 调试模式 (等待 GDB 连接)
+debug: $(TARGET).elf
+	@echo "=== QEMU 调试模式，等待 GDB 连接 (端口 1234) ==="
+	$(QEMU) $(QEMU_FLAGS) $< -s -S
+
+# 清理
+clean:
+	rm -f $(ALL_OBJ) $(TARGET).elf $(TARGET).bin $(TARGET).map
+
+.PHONY: all run debug clean
