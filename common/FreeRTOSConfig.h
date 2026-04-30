@@ -10,6 +10,10 @@
 #ifndef FREERTOS_CONFIG_H
 #define FREERTOS_CONFIG_H
 
+/* Assert macro for debugging - prints to UART and halts */
+extern void vAssertCalled(const char *file, int line);
+#define configASSERT( x ) if( !( x ) ) vAssertCalled( __FILE__, __LINE__ )
+
 /*-----------------------------------------------------------
  * 基本配置
  *-----------------------------------------------------------*/
@@ -93,12 +97,12 @@
  */
 /* 
  * 中断优先级配置
- * MPS2-AN385 QEMU 平台使用 NVIC 优先级寄存器
- * configKERNEL_INTERRUPT_PRIORITY: 内核使用最低优先级 (255)
- * configMAX_SYSCALL_INTERRUPT_PRIORITY: 可调用 FreeRTOS API 的最高中断优先级
+ * MPS2-AN385 QEMU 平台实现了 8 位优先级寄存器
+ * 当硬件实现8位优先级时，最低位用于子优先级
+ * configMAX_SYSCALL_INTERRUPT_PRIORITY 的 bit0 必须为 0
  */
 #define configKERNEL_INTERRUPT_PRIORITY         255
-#define configMAX_SYSCALL_INTERRUPT_PRIORITY    191  /* 优先级5 shifted left, 高于此优先级的中断不受FreeRTOS管理 */
+#define configMAX_SYSCALL_INTERRUPT_PRIORITY    160  /* 0xA0, bit0=0, 满足8位优先级要求 */
 
 /*-----------------------------------------------------------
  * 中断处理函数映射
@@ -110,6 +114,6 @@
 /*-----------------------------------------------------------
  * 断言配置 (调试用)
  *-----------------------------------------------------------*/
-#define configASSERT(x) if((x) == 0) { taskDISABLE_INTERRUPTS(); for(;;); }
+/* configASSERT defined at top of file */
 
 #endif /* FREERTOS_CONFIG_H */

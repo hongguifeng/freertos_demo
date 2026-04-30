@@ -125,6 +125,14 @@ void Default_Handler(void)
  */
 void HardFault_Handler(void)
 {
+    /* Write "HARDFAULT!\n" directly via UART0 */
+    volatile uint32_t *uart_data = (volatile uint32_t *)0x40004000;
+    volatile uint32_t *uart_state = (volatile uint32_t *)0x40004004;
+    const char *msg = "!!! HARDFAULT !!!\r\n";
+    while (*msg) {
+        while (*uart_state & 1);
+        *uart_data = *msg++;
+    }
     while (1);
 }
 

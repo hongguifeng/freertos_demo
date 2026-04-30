@@ -76,7 +76,7 @@ $(TARGET).bin: $(TARGET).elf
 run: $(TARGET).elf
 	@echo "=== 运行 QEMU (MPS2-AN385 Cortex-M3) ==="
 	@echo "=== 5秒后自动退出，或按 Ctrl+A X 手动退出 ==="
-	@timeout 5 $(QEMU) $(QEMU_FLAGS) $< || true
+	@timeout --foreground 5 $(QEMU) $(QEMU_FLAGS) $< || true
 
 # 调试模式 (等待 GDB 连接)
 debug: $(TARGET).elf

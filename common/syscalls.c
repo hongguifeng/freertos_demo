@@ -64,6 +64,27 @@ int _write(int file, char *ptr, int len)
 }
 
 /*
+ * Assert handler for FreeRTOS configASSERT
+ */
+void vAssertCalled(const char *file, int line)
+{
+    (void)line;
+    uart_putc('A'); uart_putc('S'); uart_putc('S'); uart_putc('E');
+    uart_putc('R'); uart_putc('T'); uart_putc(':'); uart_putc(' ');
+    while (*file) uart_putc(*file++);
+    uart_putc(':');
+    /* Print line number */
+    char buf[10];
+    int i = 0;
+    int l = line;
+    if (l == 0) { buf[i++] = '0'; }
+    else { while(l) { buf[i++] = '0' + l%10; l /= 10; } }
+    while (i > 0) uart_putc(buf[--i]);
+    uart_putc('\r'); uart_putc('\n');
+    while (1);
+}
+
+/*
  * _read - 读输入 (暂不实现)
  */
 int _read(int file, char *ptr, int len)
