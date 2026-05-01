@@ -1,76 +1,133 @@
 /*
- * FreeRTOS 教程 - 第1课: 任务基础
- * 
- * 知识点:
- * 1. 什么是 RTOS 任务 (Task)
- * 2. 如何创建任务 (xTaskCreate)
- * 3. 启动调度器 (vTaskStartScheduler)
- * 4. 任务延时 (vTaskDelay)
- * 5. 任务状态: Running, Ready, Blocked, Suspended
+ * FreeRTOS 教程 - 第1课: 任务基础与等待原理
  *
- * 本示例创建两个任务:
- * - Task1: 每500ms打印一次
- * - Task2: 每1000ms打印一次
- * 
- * 预期输出:
- *   [Task1] Hello from Task1! Count: 1
- *   [Task1] Hello from Task1! Count: 2
- *   [Task2] Hello from Task2! Count: 1
- *   [Task1] Hello from Task1! Count: 3
- *   [Task1] Hello from Task1! Count: 4
- *   [Task2] Hello from Task2! Count: 2
- *   ...
+ * 本示例不只演示如何创建任务，还直接把“等待模块”跑出来：
+ * 1. RelativeDelayTask 使用 vTaskDelay() 进入 Blocked 状态
+ * 2. AbsoluteDelayTask 使用 vTaskDelayUntil() 按绝对 tick 周期唤醒
+ * 3. MonitorTask 以更高优先级采样其他任务状态，观察 Ready/Blocked/Suspended
+ *
+ * 观察重点：
+ * - 任务等待不是忙等，而是被移入 delayed list
+ * - 到达唤醒 tick 后，任务会被移回 ready list
+ * - vTaskDelayUntil() 通过固定目标 tick 减少周期漂移
  */
 
 #include <stdio.h>
 #include "FreeRTOS.h"
 #include "task.h"
 
-/* 外部函数: UART初始化 */
 extern void uart_init(void);
 
-/*-----------------------------------------------------------
- * 任务1: 每500ms执行一次
- *-----------------------------------------------------------*/
-void vTask1(void *pvParameters)
+static TaskHandle_t xRelativeDelayTaskHandle = NULL;
+static TaskHandle_t xAbsoluteDelayTaskHandle = NULL;
+
+static const char *prvTaskStateToString(eTaskState state)
 {
-    (void)pvParameters;  /* 未使用参数 */
-    uint32_t count = 0;
-
-    for (;;)  /* 任务必须是无限循环 */
+    switch (state)
     {
-        count++;
-        printf("[Task1] Hello from Task1! Count: %lu\n", (unsigned long)count);
-
-        /* vTaskDelay: 将任务置为 Blocked 状态
-         * pdMS_TO_TICKS(500) 将毫秒转换为 Tick 数
-         * 在此期间，CPU 可以运行其他任务 */
-        vTaskDelay(pdMS_TO_TICKS(500));
-
-        /* 运行一段时间后退出演示 */
-        if (count >= 8) {
-            printf("[Task1] Demo complete. Halting.\n");
-            vTaskEndScheduler();
-            for(;;);
-        }
+        case eRunning:
+            return "Running";
+        case eReady:
+            return "Ready";
+        case eBlocked:
+            return "Blocked";
+        case eSuspended:
+            return "Suspended";
+        case eDeleted:
+            return "Deleted";
+        default:
+            return "Invalid";
     }
 }
 
 /*-----------------------------------------------------------
- * 任务2: 每1000ms执行一次
+ * 相对延时任务: 当前 tick + 固定延时
  *-----------------------------------------------------------*/
-void vTask2(void *pvParameters)
+static void vRelativeDelayTask(void *pvParameters)
 {
+    const TickType_t xDelayTicks = pdMS_TO_TICKS(300);
+    uint32_t round = 0;
+
     (void)pvParameters;
-    uint32_t count = 0;
 
     for (;;)
     {
-        count++;
-        printf("[Task2] Hello from Task2! Count: %lu\n", (unsigned long)count);
+        TickType_t xNow = xTaskGetTickCount();
 
-        /* 延时1000ms */
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        round++;
+        printf("[Relative] round=%lu running tick=%lu, vTaskDelay(%lu) -> wake around tick=%lu\n",
+               (unsigned long)round,
+               (unsigned long)xNow,
+               (unsigned long)xDelayTicks,
+               (unsigned long)(xNow + xDelayTicks));
+
+        vTaskDelay(xDelayTicks);
+    }
+}
+
+/*-----------------------------------------------------------
+ * 绝对延时任务: 以固定周期唤醒，避免累积漂移
+ *-----------------------------------------------------------*/
+static void vAbsoluteDelayTask(void *pvParameters)
+{
+    const TickType_t xPeriodTicks = pdMS_TO_TICKS(500);
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    uint32_t round = 0;
+
+    (void)pvParameters;
+
+    for (;;)
+    {
+        TickType_t xNow = xTaskGetTickCount();
+        TickType_t xNextWake = xLastWakeTime + xPeriodTicks;
+
+        round++;
+        printf("[Absolute] round=%lu running tick=%lu, next target tick=%lu via vTaskDelayUntil()\n",
+               (unsigned long)round,
+               (unsigned long)xNow,
+               (unsigned long)xNextWake);
+
+        vTaskDelayUntil(&xLastWakeTime, xPeriodTicks);
+    }
+}
+
+/*-----------------------------------------------------------
+ * 监控任务: 更高优先级采样其他任务状态
+ *-----------------------------------------------------------*/
+static void vMonitorTask(void *pvParameters)
+{
+    const TickType_t xSamplePeriod = pdMS_TO_TICKS(100);
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    uint32_t sample = 0;
+
+    (void)pvParameters;
+
+    for (;;)
+    {
+        TickType_t xNow = xTaskGetTickCount();
+        eTaskState xRelativeState = eTaskGetState(xRelativeDelayTaskHandle);
+        eTaskState xAbsoluteState = eTaskGetState(xAbsoluteDelayTaskHandle);
+
+        sample++;
+        printf("[Monitor ] sample=%lu tick=%lu relative=%s absolute=%s\n",
+               (unsigned long)sample,
+               (unsigned long)xNow,
+               prvTaskStateToString(xRelativeState),
+               prvTaskStateToString(xAbsoluteState));
+
+        if (sample == 18U)
+        {
+            printf("[Monitor ] Compare with suspended state: suspend both worker tasks now.\n");
+            vTaskSuspend(xRelativeDelayTaskHandle);
+            vTaskSuspend(xAbsoluteDelayTaskHandle);
+            printf("[Monitor ] after suspend: relative=%s absolute=%s\n",
+                   prvTaskStateToString(eTaskGetState(xRelativeDelayTaskHandle)),
+                   prvTaskStateToString(eTaskGetState(xAbsoluteDelayTaskHandle)));
+            printf("[Monitor ] Demo complete. Idle task keeps the system alive until QEMU timeout.\n");
+            vTaskSuspend(NULL);
+        }
+
+        vTaskDelayUntil(&xLastWakeTime, xSamplePeriod);
     }
 }
 
@@ -79,63 +136,59 @@ void vTask2(void *pvParameters)
  *-----------------------------------------------------------*/
 int main(void)
 {
-    /* 初始化 UART (用于 printf 输出) */
-    uart_init();
-
-    printf("========================================\n");
-    printf("  FreeRTOS Lesson 01: Task Basics\n");
-    printf("  Platform: QEMU MPS2-AN385 (Cortex-M3)\n");
-    printf("========================================\n\n");
-
-    /*
-     * xTaskCreate() 参数说明:
-     * 1. pvTaskCode:    任务函数指针
-     * 2. pcName:        任务名称 (调试用)
-     * 3. usStackDepth:  任务栈大小 (单位: 字/word)
-     * 4. pvParameters:  传递给任务的参数
-     * 5. uxPriority:    任务优先级 (数字越大优先级越高)
-     * 6. pxCreatedTask: 任务句柄 (可为NULL)
-     *
-     * 返回值: pdPASS=成功, errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY=失败
-     */
-
     BaseType_t ret;
 
-    ret = xTaskCreate(vTask1,       /* 任务函数 */
-                      "Task1",      /* 任务名称 */
-                      256,          /* 栈大小 (256个字 = 1024字节) */
-                      NULL,         /* 参数 */
-                      2,            /* 优先级: 2 */
-                      NULL);        /* 不需要任务句柄 */
-    if (ret != pdPASS) {
-        printf("ERROR: Failed to create Task1!\n");
+    uart_init();
+
+    printf("====================================================\n");
+    printf("  FreeRTOS Lesson 01: Task Basics + Wait Internals\n");
+    printf("  Platform: QEMU MPS2-AN385 (Cortex-M3)\n");
+    printf("====================================================\n\n");
+    printf("Monitor(pri=3, 100ms) samples worker states before they run.\n");
+    printf("RelativeDelay(pri=2) uses vTaskDelay(300ms).\n");
+    printf("AbsoluteDelay(pri=1) uses vTaskDelayUntil(500ms).\n\n");
+
+    ret = xTaskCreate(vMonitorTask,
+                      "Monitor",
+                      256,
+                      NULL,
+                      3,
+                      NULL);
+    if (ret != pdPASS)
+    {
+        printf("ERROR: Failed to create Monitor task!\n");
     }
 
-    ret = xTaskCreate(vTask2,       /* 任务函数 */
-                      "Task2",      /* 任务名称 */
-                      256,          /* 栈大小 */
-                      NULL,         /* 参数 */
-                      1,            /* 优先级: 1 (低于Task1) */
-                      NULL);        /* 不需要任务句柄 */
-    if (ret != pdPASS) {
-        printf("ERROR: Failed to create Task2!\n");
+    ret = xTaskCreate(vRelativeDelayTask,
+                      "RelDelay",
+                      256,
+                      NULL,
+                      2,
+                      &xRelativeDelayTaskHandle);
+    if (ret != pdPASS)
+    {
+        printf("ERROR: Failed to create RelativeDelay task!\n");
+    }
+
+    ret = xTaskCreate(vAbsoluteDelayTask,
+                      "AbsDelay",
+                      256,
+                      NULL,
+                      1,
+                      &xAbsoluteDelayTaskHandle);
+    if (ret != pdPASS)
+    {
+        printf("ERROR: Failed to create AbsoluteDelay task!\n");
     }
 
     printf("Tasks created. Starting scheduler...\n\n");
 
-    /*
-     * vTaskStartScheduler():
-     * - 启动 FreeRTOS 调度器
-     * - 创建空闲任务 (Idle Task)
-     * - 开始任务调度
-     * - 此函数正常情况下不会返回!
-     * - 如果返回，说明内存不足
-     */
     vTaskStartScheduler();
 
-    /* 不应到达这里 */
     printf("ERROR: Scheduler returned! Insufficient memory?\n");
-    for (;;);
+    for (;;)
+    {
+    }
 
     return 0;
 }
