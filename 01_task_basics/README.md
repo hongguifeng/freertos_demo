@@ -93,6 +93,211 @@ LDR R0, [pxCurrentTCB]   // 取 TCB 地址
 LDR R0, [R0]             // 偏移 0 就是 pxTopOfStack
 ```
 
+### TCB 完整成员详解
+
+上面只展示了最核心的几个字段。实际的 `tskTaskControlBlock` 通过条件编译包含了更多成员，覆盖了 FreeRTOS 的所有子系统。下面逐一拆解（按源码中声明顺序）：
+
+```c
+typedef struct tskTaskControlBlock
+{
+    /* ═══════════════ 必须成员 ═══════════════ */
+
+    volatile StackType_t *pxTopOfStack;
+    // ★ 栈顶指针。上下文切换时 PendSV 从这里恢复/保存寄存器。
+    //   必须是结构体第一个成员 (偏移 0)，汇编层零偏移直接访问。
+
+    /* ═══════════════ 条件编译成员 (按出现顺序) ═══════════════ */
+
+    // --- MPU 保护 ---
+    xMPU_SETTINGS xMPUSettings;
+    // [portUSING_MPU_WRAPPERS == 1]
+    // 存放该任务的 MPU 区域配置（哪些内存可读/可写/可执行）。
+    // 必须是第二个成员，PendSV 中紧随 pxTopOfStack 之后访问它来配置 MPU。
+
+    // --- 多核亲和性 ---
+    UBaseType_t uxCoreAffinityMask;
+    // [configUSE_CORE_AFFINITY == 1 && configNUMBER_OF_CORES > 1]
+    // 位掩码，指定此任务允许运行在哪些核心上。
+    // 例: 0x03 表示可以在 Core0 和 Core1 上运行。
+
+    /* ═══════════════ 核心调度成员 ═══════════════ */
+
+    ListItem_t xStateListItem;
+    // 状态链表节点。任务当前处于哪个状态，就挂在哪条链表上：
+    //   Ready    → pxReadyTasksLists[uxPriority]
+    //   Blocked  → pxDelayedTaskList (排序值 = 唤醒 tick)
+    //   Suspended→ xSuspendedTaskList
+    //   Deleted  → xTasksWaitingTermination
+    // 每个任务只有一个 xStateListItem，因此同一时刻只能在一条链表中。
+
+    ListItem_t xEventListItem;
+    // 事件链表节点。任务等待队列/信号量/事件组时，被挂到对应对象的等待链表上。
+    // 排序值 = configMAX_PRIORITIES - uxPriority（优先级反转存储，使高优先级排前面）。
+    // 当事件满足时，内核从此链表中取出任务并移回 Ready 链表。
+    // 和 xStateListItem 是独立的：一个任务可以同时在 delayed list (超时) 和
+    // event list (等待事件) 上。
+
+    UBaseType_t uxPriority;
+    // 任务的当前优先级。0 为最低 (Idle)，configMAX_PRIORITIES-1 为最高。
+    // 可能因优先级继承被临时提升（见 uxBasePriority）。
+
+    StackType_t *pxStack;
+    // 指向任务栈空间的起始地址（栈底）。
+    // 任务删除时用它来 vPortFree() 释放栈内存。
+    // 与 pxTopOfStack 不同：pxStack 固定不变，pxTopOfStack 随压栈/弹栈变化。
+
+    // --- 多核运行状态 ---
+    volatile BaseType_t xTaskRunState;
+    // [configNUMBER_OF_CORES > 1]
+    // 指示任务当前运行在哪个核心上 (0, 1, ...)。
+    // 值为 taskTASK_NOT_RUNNING (-1) 表示未运行。
+    // 值为 taskTASK_SCHEDULED_TO_YIELD (-2) 表示已被请求让出 CPU。
+
+    UBaseType_t uxTaskAttributes;
+    // [configNUMBER_OF_CORES > 1]
+    // 任务属性标志。目前仅用于标识 Idle 任务 (taskATTRIBUTE_IS_IDLE)。
+    // 调度器在多核选择算法中需要区分 Idle 任务和用户任务。
+
+    char pcTaskName[configMAX_TASK_NAME_LEN];
+    // 任务的描述性名称，纯粹用于调试。
+    // 不参与调度逻辑，但 SEGGER SystemView / OpenOCD / vTaskList() 会显示它。
+    // 最长 configMAX_TASK_NAME_LEN 字符（含结尾 '\0'）。
+
+    // --- 抢占禁止 ---
+    BaseType_t xPreemptionDisable;
+    // [configUSE_TASK_PREEMPTION_DISABLE == 1]
+    // 非零时，此任务不会被更高优先级任务抢占。
+    // 用于临时保护关键代码段，比临界区更轻量（不关中断）。
+
+    // --- 栈溢出检测 ---
+    StackType_t *pxEndOfStack;
+    // [portSTACK_GROWTH > 0 || configRECORD_STACK_HIGH_ADDRESS == 1]
+    // 指向栈空间的最高合法地址（栈向下增长时为高地址端）。
+    // 内核用它做栈溢出检测：如果 pxTopOfStack 超过此边界就触发
+    // vApplicationStackOverflowHook()。
+
+    // --- 临界区嵌套计数 ---
+    UBaseType_t uxCriticalNesting;
+    // [portCRITICAL_NESTING_IN_TCB == 1]
+    // 记录此任务进入临界区的嵌套深度。
+    // 某些端口 (如 SMP) 需要在 TCB 中维护此计数而非使用全局变量，
+    // 因为多核同时有多个任务在运行。
+
+    // --- 调试/追踪 ---
+    UBaseType_t uxTCBNumber;
+    // [configUSE_TRACE_FACILITY == 1]
+    // 全局递增编号，每创建一个 TCB 加 1。
+    // 调试器用它判断"一个任务被删除后再创建"的情况（地址相同但编号不同）。
+
+    UBaseType_t uxTaskNumber;
+    // [configUSE_TRACE_FACILITY == 1]
+    // 供第三方追踪工具（如 Tracealyzer）自由使用的编号字段。
+    // 内核本身不修改它，由追踪工具通过 vTaskSetTaskNumber() 设置。
+
+    // --- 互斥量与优先级继承 ---
+    UBaseType_t uxBasePriority;
+    // [configUSE_MUTEXES == 1]
+    // 任务的"原始优先级"。当任务因持有互斥量而被优先级继承提升时，
+    // uxPriority 会临时升高，而 uxBasePriority 保持不变。
+    // 释放互斥量后，uxPriority 恢复为 uxBasePriority。
+
+    UBaseType_t uxMutexesHeld;
+    // [configUSE_MUTEXES == 1]
+    // 此任务当前持有的互斥量数量。
+    // 计数归零时才能安全恢复 uxBasePriority（因为可能嵌套持有多个互斥量）。
+
+    // --- 应用层钩子 ---
+    TaskHookFunction_t pxTaskTag;
+    // [configUSE_APPLICATION_TASK_TAG == 1]
+    // 用户可以给每个任务绑定一个回调函数指针 (vTaskSetApplicationTaskTag)。
+    // 典型用途：在 trace 回调中区分任务，或实现每任务的自定义行为。
+
+    // --- 线程局部存储 ---
+    void *pvThreadLocalStoragePointers[configNUM_THREAD_LOCAL_STORAGE_POINTERS];
+    // [configNUM_THREAD_LOCAL_STORAGE_POINTERS > 0]
+    // 每任务私有的指针数组，类似 POSIX pthread_key。
+    // 中间件库可以给每个任务存放独立的上下文数据，不需要全局表。
+    // 例如 lwIP、文件系统驱动等使用此机制存储每任务状态。
+
+    // --- 运行时统计 ---
+    configRUN_TIME_COUNTER_TYPE ulRunTimeCounter;
+    // [configGENERATE_RUN_TIME_STATS == 1]
+    // 累计此任务在 Running 状态花费的时间（高精度计数器单位）。
+    // vTaskGetRunTimeStats() / uxTaskGetSystemState() 用它计算 CPU 占用率。
+    // 每次切入此任务时读取硬件计时器，切出时累加差值到此字段。
+
+    // --- C 运行时 TLS ---
+    configTLS_BLOCK_TYPE xTLSBlock;
+    // [configUSE_C_RUNTIME_TLS_SUPPORT == 1]
+    // C 运行时库的 Thread-Local Storage 块（如 newlib 的 _reent 结构）。
+    // 上下文切换时内核调用 configSET_TLS_BLOCK 把 C 库全局指针切换到此块，
+    // 确保 errno、malloc 锁等对每个任务独立。
+
+    // --- 任务通知 ---
+    volatile uint32_t ulNotifiedValue[configTASK_NOTIFICATION_ARRAY_ENTRIES];
+    // [configUSE_TASK_NOTIFICATIONS == 1]
+    // 任务通知值数组。每个通知槽可以用作：轻量信号量、事件标志、邮箱。
+    // 默认 configTASK_NOTIFICATION_ARRAY_ENTRIES = 1（单个通知），可扩展到多个。
+
+    volatile uint8_t ucNotifyState[configTASK_NOTIFICATION_ARRAY_ENTRIES];
+    // [configUSE_TASK_NOTIFICATIONS == 1]
+    // 通知状态：
+    //   taskNOT_WAITING_NOTIFICATION (0) — 不在等通知
+    //   taskWAITING_NOTIFICATION (1)     — 正在等通知（Blocked）
+    //   taskNOTIFICATION_RECEIVED (2)    — 收到了通知
+    // 配合 ulNotifiedValue 实现零拷贝的轻量 IPC。
+
+    // --- 静态/动态分配标记 ---
+    uint8_t ucStaticallyAllocated;
+    // [tskSTATIC_AND_DYNAMIC_ALLOCATION_POSSIBLE != 0]
+    // 标记此任务的内存来源：
+    //   tskDYNAMICALLY_ALLOCATED_STACK_AND_TCB (0) — 全部动态分配
+    //   tskSTATICALLY_ALLOCATED_STACK_ONLY (1)     — 栈静态，TCB 动态
+    //   tskSTATICALLY_ALLOCATED_STACK_AND_TCB (2)  — 全部静态
+    // vTaskDelete() 时根据此标记决定是否调用 vPortFree()。
+
+    // --- 延时中止 ---
+    uint8_t ucDelayAborted;
+    // [INCLUDE_xTaskAbortDelay == 1]
+    // 标记此任务的阻塞等待是否被 xTaskAbortDelay() 强制中断。
+    // 任务醒来后可检查此标记判断是正常超时还是被外部中止。
+
+    // --- POSIX errno ---
+    int iTaskErrno;
+    // [configUSE_POSIX_ERRNO == 1]
+    // 每任务的 errno 副本。上下文切换时内核会把全局 FreeRTOS_errno
+    // 与当前任务的 iTaskErrno 互相同步，确保多任务下 errno 隔离。
+
+} tskTCB;
+```
+
+#### 成员分类总览
+
+| 类别 | 成员 | 作用 |
+|------|------|------|
+| **上下文切换** | `pxTopOfStack` | 保存/恢复寄存器的栈顶 |
+| **MPU** | `xMPUSettings` | 任务的内存保护区域配置 |
+| **调度核心** | `xStateListItem`, `xEventListItem`, `uxPriority` | 决定任务在哪条链表、何时被调度 |
+| **栈管理** | `pxStack`, `pxEndOfStack` | 栈的起止边界 |
+| **多核** | `uxCoreAffinityMask`, `xTaskRunState`, `uxTaskAttributes` | SMP 调度 |
+| **互斥/继承** | `uxBasePriority`, `uxMutexesHeld` | 优先级继承机制 |
+| **通知** | `ulNotifiedValue[]`, `ucNotifyState[]` | 轻量级 IPC |
+| **调试** | `pcTaskName`, `uxTCBNumber`, `uxTaskNumber` | 调试/追踪辅助 |
+| **运行统计** | `ulRunTimeCounter` | CPU 占用率统计 |
+| **内存标记** | `ucStaticallyAllocated` | 删除任务时是否释放内存 |
+| **TLS** | `pvThreadLocalStoragePointers[]`, `xTLSBlock` | 任务私有数据 |
+| **其他** | `xPreemptionDisable`, `ucDelayAborted`, `iTaskErrno`, `uxCriticalNesting` | 各子系统辅助 |
+
+#### 哪些成员与具体课程对应
+
+- **第 1 课 (本课)**: `pxTopOfStack`, `pxStack`, `xStateListItem`, `uxPriority`, `pcTaskName`
+- **第 3 课 队列**: `xEventListItem` — 任务等待队列时挂到队列的等待链表
+- **第 4 课 互斥锁**: `uxBasePriority`, `uxMutexesHeld` — 优先级继承的核心数据
+- **第 5 课 软件定时器**: `ulNotifiedValue` — 定时器守护任务的内部通知机制
+- **第 6 课 事件组**: `xEventListItem` — 多条件等待的链表操作
+- **第 7 课 内存管理**: `ucStaticallyAllocated` — 静态 vs 动态分配
+- **第 8 课 移植**: `pxTopOfStack`, `pxEndOfStack`, `xMPUSettings` — 汇编层直接访问的字段
+
 ---
 
 ## 任务创建过程 (xTaskCreate 内部)
