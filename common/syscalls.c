@@ -51,12 +51,20 @@ static uint8_t *heap_end = 0;
 /*
  * _write - 写输出 (printf 最终会调用这个)
  */
+static int line_start = 1;
+
 int _write(int file, char *ptr, int len)
 {
     (void)file;
     for (int i = 0; i < len; i++) {
+        if (line_start) {
+            const char *prefix = "[APP] --> ";
+            while (*prefix) uart_putc(*prefix++);
+            line_start = 0;
+        }
         if (ptr[i] == '\n') {
             uart_putc('\r');
+            line_start = 1;
         }
         uart_putc(ptr[i]);
     }

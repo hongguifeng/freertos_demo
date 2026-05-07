@@ -1,5 +1,225 @@
 # 第1课：任务基础与等待原理
+---
 
+## 什么是 Task：从裸机到 RTOS 的核心抽象
+
+### 裸机程序 vs RTOS 任务
+
+在裸机（bare-metal）程序里，只有一个 `main()` 函数顺序执行，所有逻辑塞在一个大循环中：
+
+```c
+// 裸机典型结构
+int main(void) {
+    while(1) {
+        read_sensor();
+        update_display();
+        check_buttons();
+    }
+}
+```
+
+问题：如果 `read_sensor()` 要等 10ms 的 I2C 传输，整个系统都在空转。
+
+**RTOS 的解决方案**：把每个逻辑单元封装为"任务"（Task）。每个任务拥有自己独立的栈和执行上下文，调度器在它们之间快速切换，让多个任务"看起来"同时在运行。
+
+### 任务的本质：一个永不返回的函数 + 独立栈
+
+在 FreeRTOS 中，一个任务就是一个符合特定签名的 C 函数：
+
+```c
+void vMyTask(void *pvParameters)
+{
+    // 初始化
+    for (;;) {
+        // 任务逻辑（永远不退出）
+    }
+}
+```
+
+关键规则：
+- **永不返回** — 任务函数必须是无限循环或在结束前调用 `vTaskDelete(NULL)`
+- **独立栈** — 每个任务有自己的栈空间，局部变量互不干扰
+- **独立上下文** — 每个任务"认为"自己独占 CPU
+
+---
+
+## TCB：任务控制块 (Task Control Block)
+
+每创建一个任务，内核都会分配一个 `TCB_t` 结构体来管理它的全部信息：
+
+```c
+typedef struct tskTaskControlBlock {
+    volatile StackType_t *pxTopOfStack;   // ★ 栈顶指针 (必须是第一个成员)
+    
+    ListItem_t xStateListItem;   // 状态链表节点 (Ready/Blocked/Suspended)
+    ListItem_t xEventListItem;   // 事件链表节点 (等待队列/信号量时用)
+    UBaseType_t uxPriority;      // 任务优先级 (0=最低)
+    StackType_t *pxStack;        // 栈底指针
+    char pcTaskName[configMAX_TASK_NAME_LEN];  // 任务名 (调试用)
+    
+    // ... 其他可选字段 (互斥量、通知、统计等)
+} TCB_t;
+```
+
+### 内存布局
+
+`xTaskCreate()` 会从堆上分配 TCB + 栈：
+
+```
+pvPortMalloc 分配的内存：
+┌─────────────────┐  ← pxStack (栈底, 低地址)
+│                 │
+│   Task Stack    │  ← 向上增长 (ARM: 实际向下增长)
+│                 │
+│─────────────────│  ← pxTopOfStack (当前栈顶)
+│  [保存的寄存器]  │     R4-R11, R0-R3, R12, LR, PC, xPSR
+│                 │
+└─────────────────┘  ← 栈顶 (高地址)
+
+┌─────────────────┐
+│      TCB_t      │  ← 任务控制块
+└─────────────────┘
+```
+
+### pxTopOfStack 为什么是第一个成员？
+
+PendSV 中断做上下文切换时，需要快速找到当前任务的栈顶指针来保存/恢复寄存器。
+把 `pxTopOfStack` 放在结构体第一个位置意味着：
+
+```c
+// TCB 的地址 == pxTopOfStack 的地址
+// 汇编里不需要任何偏移计算
+LDR R0, [pxCurrentTCB]   // 取 TCB 地址
+LDR R0, [R0]             // 偏移 0 就是 pxTopOfStack
+```
+
+---
+
+## 任务创建过程 (xTaskCreate 内部)
+
+```
+xTaskCreate(vMyTask, "Task", stackDepth, params, priority, &handle)
+  │
+  ├─ 1. pvPortMalloc(sizeof(TCB_t))          // 分配 TCB
+  ├─ 2. pvPortMalloc(stackDepth * 4)         // 分配栈 (Cortex-M: 4字节/单位)
+  ├─ 3. 初始化 TCB 各字段
+  │       uxPriority = priority
+  │       pcTaskName = "Task"
+  │       xStateListItem / xEventListItem 初始化
+  │
+  ├─ 4. pxPortInitialiseStack()              // ★ 伪造初始栈帧
+  │       在栈顶构造一个"假的"异常返回帧：
+  │       ┌──────────┐  高地址
+  │       │  xPSR    │  = 0x01000000 (Thumb 位)
+  │       │  PC      │  = vMyTask (任务入口)
+  │       │  LR      │  = prvTaskExitError (防止错误返回)
+  │       │  R12     │
+  │       │  R3      │
+  │       │  R2      │
+  │       │  R1      │
+  │       │  R0      │  = pvParameters (任务参数)
+  │       │  R11~R4  │  = 0 (手动保存的寄存器)
+  │       └──────────┘  低地址 ← pxTopOfStack
+  │
+  └─ 5. prvAddTaskToReadyList(pxNewTCB)      // 加入就绪列表
+         如果新任务优先级 > 当前任务 → 触发调度
+```
+
+### 为什么要"伪造栈帧"？
+
+当调度器第一次切换到新任务时，PendSV 中断会执行"恢复上下文"操作——从栈中弹出寄存器。
+新任务从未运行过，没有真实的上下文可恢复，所以创建时就预先在栈上放好初始值。
+CPU 恢复这些值后，PC = 任务函数地址，R0 = 参数，程序就从任务入口开始执行了。
+
+---
+
+## 上下文切换：任务如何"暂停"和"恢复"
+
+### 切换触发
+
+上下文切换由 **PendSV** 异常执行（最低优先级，确保不打断其他中断）：
+
+```
+触发时机：
+1. SysTick 中断 → xTaskIncrementTick() 返回 pdTRUE → 设置 PendSV
+2. 任务主动让出 → taskYIELD() → 设置 PendSV
+3. 高优先级任务就绪 → 设置 PendSV
+```
+
+### PendSV 中切换过程
+
+```
+xPortPendSVHandler:
+  ┌─ 保存当前任务上下文 ─┐
+  │  MRS R0, PSP          │  // 取当前任务栈指针
+  │  STMDB R0!, {R4-R11}  │  // 手动保存 R4-R11 (硬件自动保存了其余)
+  │  STR R0, [pxCurrentTCB]│  // 更新 TCB.pxTopOfStack
+  └────────────────────────┘
+  
+  ┌─ 选择下一个任务 ─────┐
+  │  BL vTaskSwitchContext │  // 调用 taskSELECT_HIGHEST_PRIORITY_TASK
+  └────────────────────────┘
+  
+  ┌─ 恢复新任务上下文 ───┐
+  │  LDR R0, [pxCurrentTCB]│  // 新任务的 pxTopOfStack
+  │  LDMIA R0!, {R4-R11}  │  // 恢复 R4-R11
+  │  MSR PSP, R0          │  // 设置 PSP
+  │  BX LR                │  // 异常返回 (硬件自动恢复 R0-R3,R12,LR,PC,xPSR)
+  └────────────────────────┘
+```
+
+**核心思想**：每个任务的栈保存了该任务被中断时的完整 CPU 状态。
+切换时只需把 SP 指向另一个任务的栈，CPU 就"回到"那个任务上次被打断的地方继续执行。
+
+---
+
+## 任务状态与生命周期
+
+```
+                  xTaskCreate()
+                       │
+                       ▼
+                ┌─────────────┐
+                │    Ready    │◄──────── vTaskResume()
+                └──────┬──────┘         xQueueReceive() 成功
+                       │                xSemaphoreTake() 成功
+            调度器选中  │
+                       ▼
+                ┌─────────────┐
+         ┌─────│   Running   │─────┐
+         │     └─────────────┘     │
+         │            │            │
+   被更高优先级抢占    │    vTaskDelay() / 等待队列 / 等待信号量
+   或时间片用完       │            │
+         │            │            ▼
+         │            │     ┌─────────────┐
+         │            │     │   Blocked   │ (在 delayed list 或 event list 中)
+         │            │     └─────────────┘
+         │            │
+         │     vTaskSuspend()
+         │            │
+         │            ▼
+         │     ┌─────────────┐
+         │     │  Suspended  │ (在 xSuspendedTaskList 中)
+         │     └─────────────┘
+         │
+         └───► 回到 Ready
+```
+
+每个状态对应一条链表：
+- **Ready**: `pxReadyTasksLists[优先级]` — 按优先级分组
+- **Blocked**: `pxDelayedTaskList` — 按唤醒时间排序
+- **Suspended**: `xSuspendedTaskList` — 无序，需显式恢复
+
+---
+
+## 从"任务是什么"到"任务如何等待"
+
+理解了上面的基础后，后续内容将深入**任务等待**的具体实现：
+当任务调用 `vTaskDelay()` 时，内核如何把它从 Ready 链表迁移到 Delayed 链表，
+以及 SysTick 中断如何在正确的时刻将其唤醒。
+
+---
 这一课不再只停留在 API 用法，而是把 `Task` 的等待/唤醒链路拆开。重点不是“调用了 `vTaskDelay()` 会延时”，而是任务在内核里究竟被放进了哪张链表、何时被挪回 Ready 列表，以及为什么 `vTaskDelayUntil()` 能避免周期漂移。
 
 ## 本课目标

@@ -1,0 +1,77 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build Lesson 01 - Task Basics",
+            "type": "shell",
+            "command": "make",
+            "args": ["all"],
+            "options": { "cwd": "${workspaceFolder}/01_task_basics" },
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Build Lesson 02 - Task Management",
+            "type": "shell",
+            "command": "make",
+            "args": ["all"],
+            "options": { "cwd": "${workspaceFolder}/02_task_management" },
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Build Lesson 03 - Queue",
+            "type": "shell",
+            "command": "make",
+            "args": ["all"],
+            "options": { "cwd": "${workspaceFolder}/03_queue" },
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Build Lesson 04 - Semaphore Mutex",
+            "type": "shell",
+            "command": "make",
+            "args": ["all"],
+            "options": { "cwd": "${workspaceFolder}/04_semaphore_mutex" },
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Build Lesson 05 - Software Timer",
+            "type": "shell",
+            "command": "make",
+            "args": ["all"],
+            "options": { "cwd": "${workspaceFolder}/05_software_timer" },
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Build Lesson 06 - Event Groups",
+            "type": "shell",
+            "command": "make",
+            "args": ["all"],
+            "options": { "cwd": "${workspaceFolder}/06_event_groups" },
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Build Lesson 07 - Memory Management",
+            "type": "shell",
+            "command": "make",
+            "args": ["all"],
+            "options": { "cwd": "${workspaceFolder}/07_memory_management" },
+            "group": "build",
+            "problemMatcher": "$gcc"
+        },
+        {
+            "label": "Build Lesson 08 - Porting",
+            "type": "shell",
+            "command": "make",
+            "args": ["all"],
+            "options": { "cwd": "${workspaceFolder}/08_porting" },
+            "group": "build",
+            "problemMatcher": "$gcc"
+        }
+    ]
+}

@@ -1,112 +1,179 @@
 /*
- * FreeRTOS 教程 - 第3课: 队列通信 (Queue)
+ * FreeRTOS 教程 - 第3课: 队列阻塞与事件链表
  *
- * 知识点:
- * 1. 队列的概念 - 任务间安全的数据传递机制 (FIFO)
- * 2. xQueueCreate() - 创建队列
- * 3. xQueueSend() / xQueueReceive() - 发送/接收数据
- * 4. xQueueSendToFront() / xQueueSendToBack() - 队首/队尾发送
- * 5. uxQueueMessagesWaiting() - 查询队列中的消息数
- * 6. 多生产者单消费者模型
+ * 本示例刻意制造两种等待：
+ * 1. Consumer 在空队列上执行 xQueueReceive(portMAX_DELAY)
+ * 2. Producer 在满队列上执行 xQueueSend(timeout)
  *
- * 演示:
- * - Producer1: 发送温度数据
- * - Producer2: 发送湿度数据
- * - Consumer: 接收并打印所有数据
+ * 观察重点：
+ * - 等数据的任务会进入 xTasksWaitingToReceive
+ * - 等空间的任务会进入 xTasksWaitingToSend
+ * - Monitor 任务定期采样，帮助把运行输出和 Blocked/Ready 状态对上
  */
 
 #include <stdio.h>
-#include <string.h>
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
 
 extern void uart_init(void);
 
-/* 定义消息结构体 */
-typedef struct {
-    char source[12];   /* 数据来源 */
-    int32_t value;     /* 数据值 */
-} SensorData_t;
-
-/* 队列句柄 */
-static QueueHandle_t xSensorQueue = NULL;
-static volatile int demo_count = 0;
-
-/*-----------------------------------------------------------
- * 温度传感器任务 (生产者1)
- *-----------------------------------------------------------*/
-void vTempProducer(void *pvParameters)
+typedef struct
 {
-    (void)pvParameters;
-    SensorData_t data;
-    int32_t temp = 25;
-    BaseType_t ret;
+    uint32_t sequence;
+    TickType_t producedAt;
+} QueueMessage_t;
 
-    for (;;)
+static QueueHandle_t xDemoQueue = NULL;
+static TaskHandle_t xProducerHandle = NULL;
+static TaskHandle_t xConsumerHandle = NULL;
+
+static const char *prvTaskStateToString(eTaskState state)
+{
+    switch (state)
     {
-        temp = 20 + (temp + 3) % 15;
-        strcpy(data.source, "Temp");
-        data.value = temp;
-
-        /* xQueueSend: 发送数据到队列尾部
-         * 参数: 队列句柄, 数据指针, 超时时间
-         * pdMS_TO_TICKS(100): 如果队列满，等待最多100ms */
-        ret = xQueueSend(xSensorQueue, &data, pdMS_TO_TICKS(100));
-        if (ret != pdPASS) {
-            printf("[Temp  ] Queue full! Data lost.\n");
-        }
-        vTaskDelay(pdMS_TO_TICKS(300));
+        case eRunning:
+            return "Running";
+        case eReady:
+            return "Ready";
+        case eBlocked:
+            return "Blocked";
+        case eSuspended:
+            return "Suspended";
+        case eDeleted:
+            return "Deleted";
+        default:
+            return "Invalid";
     }
 }
 
 /*-----------------------------------------------------------
- * 湿度传感器任务 (生产者2)
+ * 生产者: 启动稍晚，先唤醒消费者，随后持续把队列填满
  *-----------------------------------------------------------*/
-void vHumidProducer(void *pvParameters)
+static void vProducerTask(void *pvParameters)
 {
+    const TickType_t xStartupDelay = pdMS_TO_TICKS(350);
+    const TickType_t xSendTimeout = pdMS_TO_TICKS(500);
+    const TickType_t xProductionPeriod = pdMS_TO_TICKS(150);
+    QueueMessage_t message;
+    uint32_t sequence = 0;
+
     (void)pvParameters;
-    SensorData_t data;
-    int32_t humid = 60;
+
+    vTaskDelay(xStartupDelay);
 
     for (;;)
     {
-        humid = 50 + (humid + 7) % 30;
-        strcpy(data.source, "Humidity");
-        data.value = humid;
+        BaseType_t ret;
+        TickType_t xStartTick = xTaskGetTickCount();
+        TickType_t xEndTick;
 
-        xQueueSendToBack(xSensorQueue, &data, pdMS_TO_TICKS(100));
-        vTaskDelay(pdMS_TO_TICKS(500));
+        sequence++;
+        message.sequence = sequence;
+        message.producedAt = xStartTick;
+
+        printf("[Producer] seq=%lu attempt send at tick=%lu (depth before=%lu)\n",
+               (unsigned long)message.sequence,
+               (unsigned long)xStartTick,
+               (unsigned long)uxQueueMessagesWaiting(xDemoQueue));
+
+        ret = xQueueSend(xDemoQueue, &message, xSendTimeout);
+        xEndTick = xTaskGetTickCount();
+
+        if (ret == pdPASS)
+        {
+            printf("[Producer] seq=%lu send done at tick=%lu, waited=%lu tick(s), depth now=%lu\n",
+                   (unsigned long)message.sequence,
+                   (unsigned long)xEndTick,
+                   (unsigned long)(xEndTick - xStartTick),
+                   (unsigned long)uxQueueMessagesWaiting(xDemoQueue));
+        }
+        else
+        {
+            printf("[Producer] seq=%lu send timeout at tick=%lu after waiting %lu tick(s)\n",
+                   (unsigned long)message.sequence,
+                   (unsigned long)xEndTick,
+                   (unsigned long)(xEndTick - xStartTick));
+        }
+
+        vTaskDelay(xProductionPeriod);
     }
 }
 
 /*-----------------------------------------------------------
- * 数据处理任务 (消费者)
+ * 消费者: 启动即等空队列，收到后故意慢处理，逼出发送侧阻塞
  *-----------------------------------------------------------*/
-void vConsumer(void *pvParameters)
+static void vConsumerTask(void *pvParameters)
 {
+    const TickType_t xProcessingDelay = pdMS_TO_TICKS(700);
+    QueueMessage_t received;
+
     (void)pvParameters;
-    SensorData_t received;
-    BaseType_t ret;
 
     for (;;)
     {
-        /* xQueueReceive: 从队列头部接收数据
-         * portMAX_DELAY: 无限等待直到有数据可用
-         * 接收后数据从队列中移除 */
-        ret = xQueueReceive(xSensorQueue, &received, portMAX_DELAY);
+        BaseType_t ret;
+        TickType_t xStartTick = xTaskGetTickCount();
+        TickType_t xEndTick;
 
-        if (ret == pdPASS) {
-            printf("[Consumer] src=%-8s value=%ld  (queue remaining: %lu)\n",
-                   received.source, (long)received.value,
-                   (unsigned long)uxQueueMessagesWaiting(xSensorQueue));
-            demo_count++;
+        printf("[Consumer] wait receive at tick=%lu (depth=%lu)\n",
+               (unsigned long)xStartTick,
+               (unsigned long)uxQueueMessagesWaiting(xDemoQueue));
+
+        ret = xQueueReceive(xDemoQueue, &received, portMAX_DELAY);
+        xEndTick = xTaskGetTickCount();
+
+        if (ret == pdPASS)
+        {
+            printf("[Consumer] got seq=%lu at tick=%lu, waited=%lu tick(s), queued-for=%lu tick(s), depth now=%lu\n",
+                   (unsigned long)received.sequence,
+                   (unsigned long)xEndTick,
+                   (unsigned long)(xEndTick - xStartTick),
+                   (unsigned long)(xEndTick - received.producedAt),
+                   (unsigned long)uxQueueMessagesWaiting(xDemoQueue));
+            printf("[Consumer] process seq=%lu for 700ms -> queue may fill and block the sender\n",
+                   (unsigned long)received.sequence);
+            vTaskDelay(xProcessingDelay);
+        }
+    }
+}
+
+/*-----------------------------------------------------------
+ * 监控任务: 周期采样队列深度和任务状态
+ *-----------------------------------------------------------*/
+static void vMonitorTask(void *pvParameters)
+{
+    const TickType_t xSamplePeriod = pdMS_TO_TICKS(100);
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    uint32_t sample = 0;
+
+    (void)pvParameters;
+
+    for (;;)
+    {
+        TickType_t xNow = xTaskGetTickCount();
+
+        sample++;
+        printf("[Monitor ] sample=%lu tick=%lu depth=%lu producer=%s consumer=%s\n",
+               (unsigned long)sample,
+               (unsigned long)xNow,
+               (unsigned long)uxQueueMessagesWaiting(xDemoQueue),
+               prvTaskStateToString(eTaskGetState(xProducerHandle)),
+               prvTaskStateToString(eTaskGetState(xConsumerHandle)));
+
+        if (sample == 24U)
+        {
+            printf("[Monitor ] Stop demo: suspend producer and consumer to compare with explicit suspend.\n");
+            vTaskSuspend(xProducerHandle);
+            vTaskSuspend(xConsumerHandle);
+            printf("[Monitor ] after suspend: producer=%s consumer=%s\n",
+                   prvTaskStateToString(eTaskGetState(xProducerHandle)),
+                   prvTaskStateToString(eTaskGetState(xConsumerHandle)));
+            printf("[Monitor ] Demo complete. Idle task keeps running until QEMU timeout.\n");
+            vTaskSuspend(NULL);
         }
 
-        if (demo_count >= 10) {
-            printf("\n[Consumer] Received 10 messages. Demo complete!\n");
-            vTaskEndScheduler();
-        }
+        vTaskDelayUntil(&xLastWakeTime, xSamplePeriod);
     }
 }
 
@@ -114,28 +181,36 @@ int main(void)
 {
     uart_init();
 
-    printf("========================================\n");
-    printf("  FreeRTOS Lesson 03: Queue\n");
+    printf("====================================================\n");
+    printf("  FreeRTOS Lesson 03: Queue Wait Internals\n");
     printf("  Platform: QEMU MPS2-AN385 (Cortex-M3)\n");
-    printf("========================================\n\n");
+    printf("====================================================\n\n");
+    printf("Consumer(pri=2) blocks first on an empty queue.\n");
+    printf("Producer(pri=1) starts later and eventually blocks on a full queue.\n");
+    printf("Monitor(pri=3) samples task states every 100ms.\n\n");
 
-    /* xQueueCreate: 创建队列
-     * 参数1: 队列长度 (最多存放5条消息)
-     * 参数2: 每条消息的大小 (字节) */
-    xSensorQueue = xQueueCreate(5, sizeof(SensorData_t));
-    if (xSensorQueue == NULL) {
-        printf("ERROR: Failed to create queue!\n");
-        for(;;);
+    xDemoQueue = xQueueCreate(2, sizeof(QueueMessage_t));
+    if (xDemoQueue == NULL)
+    {
+        printf("ERROR: Failed to create demo queue!\n");
+        for (;;)
+        {
+        }
     }
 
-    printf("[Main  ] Queue created (capacity: 5, item size: %u bytes)\n\n",
-           (unsigned int)sizeof(SensorData_t));
+    printf("[Main   ] Queue created (capacity: 2, item size: %u bytes)\n\n",
+           (unsigned int)sizeof(QueueMessage_t));
 
-    xTaskCreate(vTempProducer,  "Temp",     256, NULL, 1, NULL);
-    xTaskCreate(vHumidProducer, "Humid",    256, NULL, 1, NULL);
-    xTaskCreate(vConsumer,      "Consumer", 256, NULL, 2, NULL);
+    xTaskCreate(vMonitorTask, "Monitor",  256, NULL, 3, NULL);
+    xTaskCreate(vConsumerTask, "Consumer", 256, NULL, 2, &xConsumerHandle);
+    xTaskCreate(vProducerTask, "Producer", 256, NULL, 1, &xProducerHandle);
 
     vTaskStartScheduler();
-    for (;;);
+
+    printf("ERROR: Scheduler returned!\n");
+    for (;;)
+    {
+    }
+
     return 0;
 }

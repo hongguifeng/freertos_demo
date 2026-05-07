@@ -1,0 +1,149 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug 01 - Task Basics",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/01_task_basics/lesson01.elf",
+            "cwd": "${workspaceFolder}/01_task_basics",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:1234",
+            "debugServerPath": "/usr/bin/qemu-system-arm",
+            "debugServerArgs": "-machine mps2-an385 -display none -serial stdio -monitor pty -kernel ${workspaceFolder}/01_task_basics/lesson01.elf -s -S",
+            "serverStarted": "char device redirected",
+            "serverLaunchTimeout": 5000,
+            "preLaunchTask": "Build Lesson 01 - Task Basics",
+            "setupCommands": [
+                { "text": "set remotetimeout 10" }
+            ]
+        },
+        {
+            "name": "Debug 02 - Task Management",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/02_task_management/lesson02.elf",
+            "cwd": "${workspaceFolder}/02_task_management",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:1234",
+            "debugServerPath": "/usr/bin/qemu-system-arm",
+            "debugServerArgs": "-machine mps2-an385 -display none -serial stdio -monitor pty -kernel ${workspaceFolder}/02_task_management/lesson02.elf -s -S",
+            "serverStarted": "char device redirected",
+            "serverLaunchTimeout": 5000,
+            "preLaunchTask": "Build Lesson 02 - Task Management",
+            "setupCommands": [
+                { "text": "set remotetimeout 10" }
+            ]
+        },
+        {
+            "name": "Debug 03 - Queue",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/03_queue/lesson03.elf",
+            "cwd": "${workspaceFolder}/03_queue",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:1234",
+            "debugServerPath": "/usr/bin/qemu-system-arm",
+            "debugServerArgs": "-machine mps2-an385 -display none -serial stdio -monitor pty -kernel ${workspaceFolder}/03_queue/lesson03.elf -s -S",
+            "serverStarted": "char device redirected",
+            "serverLaunchTimeout": 5000,
+            "preLaunchTask": "Build Lesson 03 - Queue",
+            "setupCommands": [
+                { "text": "set remotetimeout 10" }
+            ]
+        },
+        {
+            "name": "Debug 04 - Semaphore Mutex",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/04_semaphore_mutex/lesson04.elf",
+            "cwd": "${workspaceFolder}/04_semaphore_mutex",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:1234",
+            "debugServerPath": "/usr/bin/qemu-system-arm",
+            "debugServerArgs": "-machine mps2-an385 -display none -serial stdio -monitor pty -kernel ${workspaceFolder}/04_semaphore_mutex/lesson04.elf -s -S",
+            "serverStarted": "char device redirected",
+            "serverLaunchTimeout": 5000,
+            "preLaunchTask": "Build Lesson 04 - Semaphore Mutex",
+            "setupCommands": [
+                { "text": "set remotetimeout 10" }
+            ]
+        },
+        {
+            "name": "Debug 05 - Software Timer",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/05_software_timer/lesson05.elf",
+            "cwd": "${workspaceFolder}/05_software_timer",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:1234",
+            "debugServerPath": "/usr/bin/qemu-system-arm",
+            "debugServerArgs": "-machine mps2-an385 -display none -serial stdio -monitor pty -kernel ${workspaceFolder}/05_software_timer/lesson05.elf -s -S",
+            "serverStarted": "char device redirected",
+            "serverLaunchTimeout": 5000,
+            "preLaunchTask": "Build Lesson 05 - Software Timer",
+            "setupCommands": [
+                { "text": "set remotetimeout 10" }
+            ]
+        },
+        {
+            "name": "Debug 06 - Event Groups",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/06_event_groups/lesson06.elf",
+            "cwd": "${workspaceFolder}/06_event_groups",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:1234",
+            "debugServerPath": "/usr/bin/qemu-system-arm",
+            "debugServerArgs": "-machine mps2-an385 -display none -serial stdio -monitor pty -kernel ${workspaceFolder}/06_event_groups/lesson06.elf -s -S",
+            "serverStarted": "char device redirected",
+            "serverLaunchTimeout": 5000,
+            "preLaunchTask": "Build Lesson 06 - Event Groups",
+            "setupCommands": [
+                { "text": "set remotetimeout 10" }
+            ]
+        },
+        {
+            "name": "Debug 07 - Memory Management",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/07_memory_management/lesson07.elf",
+            "cwd": "${workspaceFolder}/07_memory_management",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:1234",
+            "debugServerPath": "/usr/bin/qemu-system-arm",
+            "debugServerArgs": "-machine mps2-an385 -display none -serial stdio -monitor pty -kernel ${workspaceFolder}/07_memory_management/lesson07.elf -s -S",
+            "serverStarted": "char device redirected",
+            "serverLaunchTimeout": 5000,
+            "preLaunchTask": "Build Lesson 07 - Memory Management",
+            "setupCommands": [
+                { "text": "set remotetimeout 10" }
+            ]
+        },
+        {
+            "name": "Debug 08 - Porting",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/08_porting/lesson08.elf",
+            "cwd": "${workspaceFolder}/08_porting",
+            "MIMode": "gdb",
+            "miDebuggerPath": "/usr/bin/gdb-multiarch",
+            "miDebuggerServerAddress": "localhost:1234",
+            "debugServerPath": "/usr/bin/qemu-system-arm",
+            "debugServerArgs": "-machine mps2-an385 -display none -serial stdio -monitor pty -kernel ${workspaceFolder}/08_porting/lesson08.elf -s -S",
+            "serverStarted": "char device redirected",
+            "serverLaunchTimeout": 5000,
+            "preLaunchTask": "Build Lesson 08 - Porting",
+            "setupCommands": [
+                { "text": "set remotetimeout 10" }
+            ]
+        }
+    ]
+}

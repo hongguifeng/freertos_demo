@@ -1,19 +1,15 @@
 /*
- * FreeRTOS 教程 - 第7课: 内存管理
+ * FreeRTOS 教程 - 第7课: 内存管理 —— heap_4 内核原理演示
  *
- * 知识点:
- * 1. FreeRTOS 内存管理方案 (heap_1 ~ heap_5)
- *    - heap_1: 只分配不释放 (最简单, 确定性最强)
- *    - heap_2: 允许释放但不合并 (可能碎片化)
- *    - heap_3: 包装标准 malloc/free (线程安全)
- *    - heap_4: 合并相邻空闲块 (推荐, 本教程使用)
- *    - heap_5: 跨多个不连续内存区域
- * 2. pvPortMalloc() / vPortFree() - FreeRTOS内存分配接口
- * 3. xPortGetFreeHeapSize() - 查询剩余堆空间
- * 4. xPortGetMinimumEverFreeHeapSize() - 历史最小剩余堆空间
- * 5. vApplicationMallocFailedHook() - 分配失败钩子
+ * 本示例深入展示 heap_4 分配器的内部行为：
+ *   阶段1: 堆初始化状态 - 观察初始空闲空间
+ *   阶段2: First Fit 分配与分裂 - 观察块如何被切割
+ *   阶段3: 释放与合并 (Coalesce) - 相邻块自动合并
+ *   阶段4: 碎片化场景 - 交错释放制造碎片
+ *   阶段5: 合并恢复 - 释放全部后碎片消除
+ *   阶段6: 水位线检测 - xPortGetMinimumEverFreeHeapSize
  *
- * 本课演示 heap_4 的动态分配和释放
+ * 原理说明见 README.md
  */
 
 #include <stdio.h>
@@ -24,95 +20,203 @@
 extern void uart_init(void);
 
 /*-----------------------------------------------------------
- * 内存管理演示任务
+ * 辅助函数：打印堆状态
  *-----------------------------------------------------------*/
-void vMemoryDemo(void *pvParameters)
+static void prvPrintHeapStatus(const char *pcLabel)
+{
+    printf("  [Heap] %-30s free=%5u  min_ever=%5u\n",
+           pcLabel,
+           (unsigned)xPortGetFreeHeapSize(),
+           (unsigned)xPortGetMinimumEverFreeHeapSize());
+}
+
+/*-----------------------------------------------------------
+ * 内存管理原理演示任务
+ *-----------------------------------------------------------*/
+void vMemoryInternalsDemo(void *pvParameters)
 {
     (void)pvParameters;
-    size_t freeHeap, minFreeHeap;
-    void *ptr1, *ptr2, *ptr3;
+    size_t xInitialFree;
 
-    printf("--- Heap Status at Start ---\n");
-    freeHeap = xPortGetFreeHeapSize();
-    minFreeHeap = xPortGetMinimumEverFreeHeapSize();
-    printf("[Mem] Total configured heap: %u bytes\n", configTOTAL_HEAP_SIZE);
-    printf("[Mem] Free heap: %u bytes\n", (unsigned)freeHeap);
-    printf("[Mem] Min ever free: %u bytes\n\n", (unsigned)minFreeHeap);
+    /* ============ 阶段1: 堆初始化状态 ============ */
+    printf("\n=== Phase 1: Heap Initialization State ===\n");
+    printf("  configTOTAL_HEAP_SIZE = %u bytes\n", (unsigned)configTOTAL_HEAP_SIZE);
+    printf("  After scheduler + this task created:\n");
+    xInitialFree = xPortGetFreeHeapSize();
+    prvPrintHeapStatus("Initial state");
+    printf("  Overhead = %u bytes (TCBs + stacks + timer task + idle)\n\n",
+           (unsigned)(configTOTAL_HEAP_SIZE - xInitialFree));
 
-    /* 分配内存 */
-    printf("--- Allocating Memory ---\n");
-    ptr1 = pvPortMalloc(1024);
-    printf("[Mem] Allocated 1024 bytes at %p, free: %u\n",
-           ptr1, (unsigned)xPortGetFreeHeapSize());
+    /* ============ 阶段2: First Fit 分配与分裂 ============ */
+    printf("=== Phase 2: First Fit Allocation & Block Splitting ===\n");
+    printf("  heap_4 traverses free list from low addr, picks first fit.\n");
+    printf("  If block > request + heapMINIMUM_BLOCK_SIZE, it splits.\n\n");
 
-    ptr2 = pvPortMalloc(2048);
-    printf("[Mem] Allocated 2048 bytes at %p, free: %u\n",
-           ptr2, (unsigned)xPortGetFreeHeapSize());
+    void *p1, *p2, *p3, *p4;
+    size_t before, after;
 
-    ptr3 = pvPortMalloc(512);
-    printf("[Mem] Allocated  512 bytes at %p, free: %u\n\n",
-           ptr3, (unsigned)xPortGetFreeHeapSize());
+    before = xPortGetFreeHeapSize();
+    p1 = pvPortMalloc(100);
+    after = xPortGetFreeHeapSize();
+    printf("  pvPortMalloc(100):  addr=%p  consumed=%u bytes\n",
+           p1, (unsigned)(before - after));
+    printf("    (100 + BlockLink_t header + alignment → actual block size)\n");
 
-    /* 使用分配的内存 */
-    if (ptr1) memset(ptr1, 0xAA, 1024);
-    if (ptr2) memset(ptr2, 0xBB, 2048);
-    if (ptr3) memset(ptr3, 0xCC, 512);
+    before = after;
+    p2 = pvPortMalloc(200);
+    after = xPortGetFreeHeapSize();
+    printf("  pvPortMalloc(200):  addr=%p  consumed=%u bytes\n",
+           p2, (unsigned)(before - after));
 
-    /* 释放内存 (heap_4 支持释放和合并) */
-    printf("--- Freeing Memory ---\n");
-    vPortFree(ptr2);  /* 先释放中间块 */
-    printf("[Mem] Freed ptr2(2048), free: %u\n",
-           (unsigned)xPortGetFreeHeapSize());
+    before = after;
+    p3 = pvPortMalloc(64);
+    after = xPortGetFreeHeapSize();
+    printf("  pvPortMalloc(64):   addr=%p  consumed=%u bytes\n",
+           p3, (unsigned)(before - after));
 
-    vPortFree(ptr1);  /* 释放第一块 */
-    printf("[Mem] Freed ptr1(1024), free: %u\n",
-           (unsigned)xPortGetFreeHeapSize());
+    before = after;
+    p4 = pvPortMalloc(500);
+    after = xPortGetFreeHeapSize();
+    printf("  pvPortMalloc(500):  addr=%p  consumed=%u bytes\n",
+           p4, (unsigned)(before - after));
 
-    vPortFree(ptr3);  /* 释放最后一块 */
-    printf("[Mem] Freed ptr3(512),  free: %u\n\n",
-           (unsigned)xPortGetFreeHeapSize());
+    prvPrintHeapStatus("After 4 allocations");
+    printf("  Note: addresses are sequential (first fit from start)\n\n");
 
-    /* heap_4 合并演示 */
-    printf("--- Fragmentation Test (heap_4 merges adjacent free blocks) ---\n");
+    /* ============ 阶段3: 释放与合并 ============ */
+    printf("=== Phase 3: Free & Coalesce (Adjacent Block Merging) ===\n");
+    printf("  prvInsertBlockIntoFreeList() merges blocks if contiguous.\n\n");
+
+    /* 先释放 p2 (中间块) - 不能与两侧合并因为 p1, p3 还在 */
+    before = xPortGetFreeHeapSize();
+    vPortFree(p2);
+    after = xPortGetFreeHeapSize();
+    printf("  vPortFree(p2=200): freed=%u bytes  (isolated, no merge)\n",
+           (unsigned)(after - before));
+    prvPrintHeapStatus("After free p2");
+
+    /* 释放 p1 (与 p2 的空闲块相邻) → 触发向后合并 */
+    before = after;
+    vPortFree(p1);
+    after = xPortGetFreeHeapSize();
+    printf("  vPortFree(p1=100): freed=%u bytes  (merges with p2's free block!)\n",
+           (unsigned)(after - before));
+    prvPrintHeapStatus("After free p1 (merged)");
+
+    /* 释放 p3 → 与前面合并后的大块再合并 */
+    before = after;
+    vPortFree(p3);
+    after = xPortGetFreeHeapSize();
+    printf("  vPortFree(p3=64):  freed=%u bytes  (merges into larger block!)\n",
+           (unsigned)(after - before));
+    prvPrintHeapStatus("After free p3 (merged)");
+
+    /* 释放 p4 → 全部合并成一个大空闲块 */
+    before = after;
+    vPortFree(p4);
+    after = xPortGetFreeHeapSize();
+    printf("  vPortFree(p4=500): freed=%u bytes  (all merged into one block)\n",
+           (unsigned)(after - before));
+    prvPrintHeapStatus("After free p4 (all merged)");
+
+    printf("  Free heap is back to initial = %s\n\n",
+           (xPortGetFreeHeapSize() == xInitialFree) ? "YES (no fragmentation!)" : "NO");
+
+    /* ============ 阶段4: 碎片化场景 ============ */
+    printf("=== Phase 4: Fragmentation Scenario ===\n");
+    printf("  Allocate 8 blocks, free even-indexed ones → holes.\n");
+    printf("  Then try to allocate a large block that doesn't fit in holes.\n\n");
+
     void *blocks[8];
     int i;
+    size_t blockSizes[8] = {128, 256, 128, 256, 128, 256, 128, 256};
 
-    /* 分配8个256字节块 */
-    for (i = 0; i < 8; i++) {
-        blocks[i] = pvPortMalloc(256);
+    for (i = 0; i < 8; i++)
+    {
+        blocks[i] = pvPortMalloc(blockSizes[i]);
     }
-    printf("[Mem] Allocated 8 x 256 bytes, free: %u\n",
-           (unsigned)xPortGetFreeHeapSize());
+    prvPrintHeapStatus("After alloc 8 blocks");
 
-    /* 释放偶数索引块 (形成碎片) */
-    for (i = 0; i < 8; i += 2) {
+    /* 释放偶数索引 (128-byte blocks) → 产生小空洞 */
+    for (i = 0; i < 8; i += 2)
+    {
         vPortFree(blocks[i]);
+        blocks[i] = NULL;
     }
-    printf("[Mem] Freed blocks 0,2,4,6, free: %u\n",
-           (unsigned)xPortGetFreeHeapSize());
+    prvPrintHeapStatus("After free 0,2,4,6 (128B)");
 
-    /* 释放奇数索引块 (heap_4 会合并相邻块) */
-    for (i = 1; i < 8; i += 2) {
+    /* 尝试分配 400 字节 - 每个空洞只有约 128 字节，不够 */
+    void *pBig = pvPortMalloc(400);
+    printf("  pvPortMalloc(400) in fragmented heap: %s\n",
+           pBig ? "SUCCESS (found space after last block)" : "FAILED (no contiguous space)");
+    if (pBig)
+    {
+        printf("    (Succeeded because free space at end of heap is still large)\n");
+        vPortFree(pBig);
+    }
+
+    /* 尝试一个真正超大的分配 */
+    size_t xFreeNow = xPortGetFreeHeapSize();
+    /* 请求比当前空闲少一点但比最大连续块大 */
+    void *pHuge = pvPortMalloc(xFreeNow - 100);
+    printf("  pvPortMalloc(%u) nearly all free: %s\n",
+           (unsigned)(xFreeNow - 100),
+           pHuge ? "SUCCESS" : "FAILED (fragmented!)");
+    if (pHuge) vPortFree(pHuge);
+    printf("\n");
+
+    /* ============ 阶段5: 合并恢复 ============ */
+    printf("=== Phase 5: Coalesce Recovery ===\n");
+    printf("  Free remaining odd-indexed blocks → all merge!\n\n");
+
+    for (i = 1; i < 8; i += 2)
+    {
         vPortFree(blocks[i]);
+        blocks[i] = NULL;
     }
-    printf("[Mem] Freed blocks 1,3,5,7, free: %u (merged!)\n",
-           (unsigned)xPortGetFreeHeapSize());
+    prvPrintHeapStatus("After free all blocks");
+    printf("  Free heap restored = %s\n",
+           (xPortGetFreeHeapSize() == xInitialFree) ? "YES" : "NO");
 
-    /* 尝试分配大块 (如果合并成功，应该可以分配) */
-    void *big = pvPortMalloc(2000);
-    printf("[Mem] Alloc 2000 bytes after merge: %s\n\n",
-           big ? "SUCCESS" : "FAILED");
-    if (big) vPortFree(big);
+    /* 现在大分配应该成功 */
+    pHuge = pvPortMalloc(xFreeNow - 100);
+    printf("  pvPortMalloc(%u) after coalesce: %s\n\n",
+           (unsigned)(xFreeNow - 100),
+           pHuge ? "SUCCESS! (fragmentation eliminated)" : "FAILED");
+    if (pHuge) vPortFree(pHuge);
 
-    /* 最终状态 */
-    printf("--- Final Heap Status ---\n");
-    printf("[Mem] Free heap: %u bytes\n", (unsigned)xPortGetFreeHeapSize());
-    printf("[Mem] Min ever free: %u bytes\n",
-           (unsigned)xPortGetMinimumEverFreeHeapSize());
+    /* ============ 阶段6: 水位线与内存规划 ============ */
+    printf("=== Phase 6: High Water Mark (Min-Ever-Free) ===\n");
+    printf("  xPortGetMinimumEverFreeHeapSize() tracks the lowest\n");
+    printf("  free-heap value ever seen → helps size configTOTAL_HEAP_SIZE.\n\n");
 
-    printf("\n[Mem] Demo complete!\n");
-    vTaskEndScheduler();
-    for(;;);
+    size_t xMinEver = xPortGetMinimumEverFreeHeapSize();
+    printf("  Current min-ever-free: %u bytes\n", (unsigned)xMinEver);
+    printf("  Peak usage = configTOTAL_HEAP_SIZE - min_ever = %u bytes\n",
+           (unsigned)(configTOTAL_HEAP_SIZE - xMinEver));
+
+    /* 制造一个峰值 */
+    void *peak[10];
+    for (i = 0; i < 10; i++)
+    {
+        peak[i] = pvPortMalloc(1024);
+    }
+    printf("  After allocating 10x1024:\n");
+    prvPrintHeapStatus("Peak allocation");
+
+    for (i = 0; i < 10; i++)
+    {
+        if (peak[i]) vPortFree(peak[i]);
+    }
+    printf("  After freeing all:\n");
+    prvPrintHeapStatus("Post-peak (min_ever unchanged!)");
+    printf("  min_ever stays at lowest point → use it to tune heap size.\n");
+
+    printf("\n=== All phases complete! ===\n");
+
+    /* 挂起自己，让 QEMU timeout 结束 */
+    vTaskSuspend(NULL);
+    for (;;) {}
 }
 
 int main(void)
@@ -121,10 +225,11 @@ int main(void)
 
     printf("========================================\n");
     printf("  FreeRTOS Lesson 07: Memory Management\n");
+    printf("  heap_4 Internals Deep Dive\n");
     printf("  Platform: QEMU MPS2-AN385 (Cortex-M3)\n");
-    printf("========================================\n\n");
+    printf("========================================\n");
 
-    xTaskCreate(vMemoryDemo, "MemDemo", 512, NULL, 1, NULL);
+    xTaskCreate(vMemoryInternalsDemo, "MemDemo", 1024, NULL, 2, NULL);
 
     vTaskStartScheduler();
     for (;;);

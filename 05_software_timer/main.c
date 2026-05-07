@@ -1,13 +1,10 @@
 /*
- * FreeRTOS 教程 - 第5课: 软件定时器
+ * FreeRTOS 教程 - 第5课: 软件定时器守护任务
  *
- * 知识点:
- * 1. 软件定时器概念 - 在定时器服务任务(daemon)中执行回调
- * 2. xTimerCreate() - 创建定时器
- * 3. 单次定时器 (One-shot) vs 周期定时器 (Auto-reload)
- * 4. xTimerStart() / xTimerStop() / xTimerReset()
- * 5. xTimerChangePeriod() - 运行时修改定时器周期
- * 6. pvTimerGetTimerID() - 定时器ID用于回调中识别定时器
+ * 观察重点：
+ * 1. timer callback 在 daemon task 中执行，不在调用者任务中执行
+ * 2. xTimerStart/xTimerChangePeriod/xTimerStop 只是向 xTimerQueue 发送命令
+ * 3. xTimerPendFunctionCall() 与普通 timer 命令复用同一条守护任务执行通道
  */
 
 #include <stdio.h>
@@ -17,103 +14,131 @@
 
 extern void uart_init(void);
 
-static volatile int periodic_count = 0;
-static volatile int oneshot_fired = 0;
+static TimerHandle_t xPeriodicTimer = NULL;
+static TimerHandle_t xOneShotTimer = NULL;
+
+static volatile uint32_t ulPeriodicCount = 0;
+static volatile uint32_t ulOneShotCount = 0;
+static volatile uint32_t ulPendedCount = 0;
 
 /*-----------------------------------------------------------
- * 周期定时器回调 - 每200ms触发一次
- * 注意: 回调在定时器服务任务的上下文中执行
- *       不能调用会阻塞的API (如 vTaskDelay)
+ * Timer callbacks and deferred function
  *-----------------------------------------------------------*/
-void vPeriodicTimerCallback(TimerHandle_t xTimer)
+static void vPeriodicTimerCallback(TimerHandle_t xTimer)
 {
-    periodic_count++;
-    printf("[Periodic ] Timer fired! Count: %d (ID: %lu)\n",
-           periodic_count,
+    ulPeriodicCount++;
+    printf("[Periodic ] fired at tick=%lu count=%lu daemon-pri=%lu timer-id=%lu\n",
+           (unsigned long)xTaskGetTickCount(),
+           (unsigned long)ulPeriodicCount,
+           (unsigned long)uxTaskPriorityGet(NULL),
            (unsigned long)pvTimerGetTimerID(xTimer));
 }
 
-/*-----------------------------------------------------------
- * 单次定时器回调 - 只触发一次
- *-----------------------------------------------------------*/
-void vOneShotTimerCallback(TimerHandle_t xTimer)
+static void vOneShotTimerCallback(TimerHandle_t xTimer)
 {
-    (void)xTimer;
-    oneshot_fired = 1;
-    printf("[OneShot  ] FIRED! (only once)\n");
+    ulOneShotCount++;
+    printf("[OneShot  ] fired at tick=%lu count=%lu daemon-pri=%lu timer-id=%lu\n",
+           (unsigned long)xTaskGetTickCount(),
+           (unsigned long)ulOneShotCount,
+           (unsigned long)uxTaskPriorityGet(NULL),
+           (unsigned long)pvTimerGetTimerID(xTimer));
+}
+
+static void vDeferredFunction(void *pvParameter1, uint32_t ulParameter2)
+{
+    const char *pcReason = (const char *)pvParameter1;
+
+    ulPendedCount++;
+    printf("[Pended   ] run at tick=%lu count=%lu reason=%s arg=%lu daemon-pri=%lu\n",
+           (unsigned long)xTaskGetTickCount(),
+           (unsigned long)ulPendedCount,
+           pcReason,
+           (unsigned long)ulParameter2,
+           (unsigned long)uxTaskPriorityGet(NULL));
 }
 
 /*-----------------------------------------------------------
- * 控制任务
+ * Controller task
  *-----------------------------------------------------------*/
-void vTimerDemo(void *pvParameters)
+static void vTimerControllerTask(void *pvParameters)
 {
+    BaseType_t xResult;
+
     (void)pvParameters;
-    TimerHandle_t xPeriodicTimer, xOneShotTimer;
 
-    /* 创建周期定时器
-     * 参数: 名称, 周期(ticks), 自动重载(pdTRUE=周期), ID, 回调 */
     xPeriodicTimer = xTimerCreate("Periodic",
-                                   pdMS_TO_TICKS(200),
-                                   pdTRUE,         /* Auto-reload = 周期定时器 */
-                                   (void *)1,      /* Timer ID */
-                                   vPeriodicTimerCallback);
+                                  pdMS_TO_TICKS(250),
+                                  pdTRUE,
+                                  (void *)1,
+                                  vPeriodicTimerCallback);
 
-    /* 创建单次定时器 */
     xOneShotTimer = xTimerCreate("OneShot",
-                                  pdMS_TO_TICKS(500),
-                                  pdFALSE,         /* One-shot = 只触发一次 */
-                                  (void *)2,
-                                  vOneShotTimerCallback);
+                                 pdMS_TO_TICKS(600),
+                                 pdFALSE,
+                                 (void *)2,
+                                 vOneShotTimerCallback);
 
-    if (xPeriodicTimer == NULL || xOneShotTimer == NULL) {
+    if ((xPeriodicTimer == NULL) || (xOneShotTimer == NULL))
+    {
         printf("ERROR: Timer creation failed!\n");
         vTaskDelete(NULL);
     }
 
-    /* 启动两个定时器 */
-    printf("[Demo     ] Starting periodic timer (200ms) and one-shot timer (500ms)\n\n");
+    printf("[Ctrl     ] Timer daemon priority=%u, command queue length=%u\n",
+           (unsigned int)configTIMER_TASK_PRIORITY,
+           (unsigned int)configTIMER_QUEUE_LENGTH);
+    printf("[Ctrl     ] Start Periodic(250ms) and OneShot(600ms)\n");
+
     xTimerStart(xPeriodicTimer, 0);
     xTimerStart(xOneShotTimer, 0);
+    xTimerPendFunctionCall(vDeferredFunction, (void *)"after-start", 1U, 0);
 
-    /* 等待一段时间观察 */
-    vTaskDelay(pdMS_TO_TICKS(1200));
+    vTaskDelay(pdMS_TO_TICKS(950));
 
-    /* 修改周期定时器的周期 */
-    printf("\n[Demo     ] Changing periodic timer to 400ms period\n\n");
+    printf("\n[Ctrl     ] Change Periodic to 400ms and reset OneShot\n");
     xTimerChangePeriod(xPeriodicTimer, pdMS_TO_TICKS(400), 0);
+    xTimerReset(xOneShotTimer, 0);
+    xTimerPendFunctionCall(vDeferredFunction, (void *)"after-change", 2U, 0);
 
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    vTaskDelay(pdMS_TO_TICKS(1100));
 
-    /* 停止定时器 */
-    printf("\n[Demo     ] Stopping periodic timer\n");
+    printf("\n[Ctrl     ] Stop Periodic and restart OneShot\n");
     xTimerStop(xPeriodicTimer, 0);
-
-    /* 重启单次定时器 (可以重新触发) */
-    printf("[Demo     ] Restarting one-shot timer\n\n");
     xTimerStart(xOneShotTimer, 0);
+    xTimerPendFunctionCall(vDeferredFunction, (void *)"after-stop", 3U, 0);
 
-    vTaskDelay(pdMS_TO_TICKS(600));
+    vTaskDelay(pdMS_TO_TICKS(800));
 
-    printf("\n[Demo     ] Total periodic fires: %d, OneShot fires: %d\n",
-           periodic_count, oneshot_fired);
-    printf("[Demo     ] Demo complete!\n");
-    vTaskEndScheduler();
-    for(;;);
+    printf("\n[Ctrl     ] Delete both timers\n");
+    xResult = xTimerDelete(xPeriodicTimer, 0);
+    printf("[Ctrl     ] xTimerDelete(periodic) -> %s\n", xResult == pdPASS ? "pdPASS" : "pdFAIL");
+    xResult = xTimerDelete(xOneShotTimer, 0);
+    printf("[Ctrl     ] xTimerDelete(one-shot) -> %s\n", xResult == pdPASS ? "pdPASS" : "pdFAIL");
+
+    printf("\n[Ctrl     ] periodic fires=%lu one-shot fires=%lu pended calls=%lu\n",
+           (unsigned long)ulPeriodicCount,
+           (unsigned long)ulOneShotCount,
+           (unsigned long)ulPendedCount);
+    printf("[Ctrl     ] Demo complete. Timer daemon will block on its queue/list until QEMU timeout.\n");
+
+    vTaskSuspend(NULL);
 }
 
 int main(void)
 {
     uart_init();
 
-    printf("========================================\n");
-    printf("  FreeRTOS Lesson 05: Software Timers\n");
+    printf("====================================================\n");
+    printf("  FreeRTOS Lesson 05: Software Timer Internals\n");
     printf("  Platform: QEMU MPS2-AN385 (Cortex-M3)\n");
-    printf("========================================\n\n");
+    printf("====================================================\n\n");
 
-    xTaskCreate(vTimerDemo, "TimerDemo", 512, NULL, 2, NULL);
+    xTaskCreate(vTimerControllerTask, "TimerCtrl", 512, NULL, 2, NULL);
 
     vTaskStartScheduler();
-    for (;;);
+    for (;;)
+    {
+    }
+
     return 0;
 }
